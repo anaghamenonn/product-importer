@@ -21,7 +21,11 @@ from django.http import JsonResponse
 def health(request):
     return JsonResponse({"status":"ok"})
 
+def home(request):
+    return JsonResponse({"message": "Backend is working!"})
+
 urlpatterns = [
+    path('', home),
     path('admin/', admin.site.urls),
     path('api/', include('products.urls')),
     path('api/', include('webhooks.urls')),

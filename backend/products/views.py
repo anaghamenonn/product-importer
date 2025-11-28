@@ -46,20 +46,17 @@ class ProductViewSet(viewsets.ModelViewSet):
 @api_view(['POST'])
 @csrf_exempt
 def upload_csv(request):
-    f = request.FILES.get('file')
-    if not f:
-        return Response({'error': 'No file provided'}, status=400)
+    file = request.FILES.get("file")
+    if not file:
+        return Response({"error": "File not provided"}, status=400)
 
-    tmp_dir = os.path.join(settings.BASE_DIR, 'tmp_uploads')
-    os.makedirs(tmp_dir, exist_ok=True)
-    filename = f'{uuid.uuid4().hex}_{f.name}'
-    filepath = os.path.join(tmp_dir, filename)
-    with open(filepath, 'wb+') as dest:
-        for chunk in f.chunks():
-            dest.write(chunk)
+    # Read full binary content
+    file_bytes = file.read()
 
-    task = import_products_from_csv.delay(filepath)
-    return Response({'task_id': task.id})
+    # Call celery and send the bytes + filename
+    task = import_products_from_csv.delay(file_bytes, file.name)
+
+    return Response({"task_id": task.id}, status=202)
 
 @api_view(['GET'])
 def task_status(request, task_id):

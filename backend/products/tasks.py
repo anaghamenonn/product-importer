@@ -1,5 +1,5 @@
 from celery import shared_task
-import csv, os, json
+import csv, os, json, io
 from django.db import connection
 from psycopg2.extras import execute_values
 from django.conf import settings
@@ -12,98 +12,106 @@ def _redis_set(task_id, payload):
     r = redis.StrictRedis.from_url(settings.CELERY_BROKER_URL)
     r.set(REDIS_PROGRESS_PREFIX + task_id, json.dumps(payload), ex=3600)
 
-@shared_task(bind=True)
-def import_products_from_csv(self, filepath):
+@shared_task(bind=True, max_retries=3, retry_backoff=True)
+def import_products_from_csv(self, file_bytes, filename):
     task_id = self.request.id
     processed = 0
     total_rows = 0
     errors = []
+
     try:
-        with open(filepath, 'rb') as fh:
-            for _ in fh:
-                total_rows += 1
-        if total_rows > 0:
-            total_rows -= 1  
+        if not file_bytes:
+            raise ValueError("Uploaded file is empty or unreadable")
 
-        _redis_set(task_id, {"task_id": task_id, "stage": "starting", "processed": 0, "total": total_rows, "message": "Starting"})
+        text_data = io.StringIO(file_bytes.decode("utf-8"))
 
-        chunk_size = 5000
+        # Count rows first
+        total_rows = sum(1 for _ in text_data) - 1
+        text_data.seek(0)
+
+        if total_rows <= 0:
+            raise ValueError("CSV contains no valid rows to process.")
+
+        _redis_set(task_id, {
+            "task_id": task_id,
+            "stage": "starting",
+            "processed": processed,
+            "total": total_rows,
+            "message": "Starting CSV import..."
+        })
+
         batch = []
-        with open(filepath, newline='', encoding='utf-8') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                sku = row.get('sku') or row.get('SKU') or row.get('Sku')
-                if not sku:
-                    if len(errors) < 100:
-                        errors.append({"row": row, "reason": "missing sku"})
-                    continue
-                name = row.get('name') or ''
-                description = row.get('description') or ''
-                price = row.get('price') or '0'
-                active = True
-                extra = {k:v for k,v in row.items() if k.lower() not in ('sku','name','description','price')}
-                batch.append((sku, sku.lower(), name, description, price, active, json.dumps(extra)))
-                if len(batch) >= chunk_size:
-                    _upsert_batch(batch)
-                    processed += len(batch)
-                    _redis_set(task_id, {"task_id": task_id, "stage": "importing", "processed": processed, "total": total_rows, "message": f"Imported {processed}/{total_rows}", "errors": errors})
-                    batch = []
-            if batch:
+        chunk_size = 3000
+        reader = csv.DictReader(text_data)
+
+        for row in reader:
+            sku = row.get('sku') or row.get('SKU')
+
+            if not sku:
+                errors.append({"row": row, "reason": "Missing SKU"})
+                continue
+
+            try:
+                price = float(row.get('price', 0))
+            except:
+                errors.append({"row": row, "reason": "Invalid price"})
+                continue
+
+            batch.append((
+                sku,
+                sku.lower(),
+                row.get('name', ''),
+                row.get('description', ''),
+                price,
+                True,
+                json.dumps({
+                    k: v for k, v in row.items() if k.lower() not in ('sku','name','description','price')
+                })
+            ))
+
+            if len(batch) >= chunk_size:
                 _upsert_batch(batch)
                 processed += len(batch)
-                _redis_set(task_id, {"task_id": task_id, "stage": "importing", "processed": processed, "total": total_rows, "message": f"Imported {processed}/{total_rows}", "errors": errors})
+                batch.clear()
 
-        _redis_set(task_id, {"task_id": task_id, "stage": "complete", "processed": processed, "total": total_rows, "message": "Import complete", "errors": errors})
+                _redis_set(task_id, {
+                    "task_id": task_id,
+                    "stage": "importing",
+                    "processed": processed,
+                    "total": total_rows,
+                    "message": f"Imported {processed}/{total_rows}"
+                })
 
-        try:
-            from webhooks.models import Webhook
-            from webhooks.tasks import deliver_webhook
+        # Final batch
+        if batch:
+            _upsert_batch(batch)
+            processed += len(batch)
 
-            payload = {
-                "event": "product.import.completed",
-                "task_id": task_id,
-                "status": "complete",
-                "processed": processed,
-                "total": total_rows,
-                "errors": errors,
-            }
+        result = {"processed": processed, "total": total_rows, "errors": errors}
 
-            for wh in Webhook.objects.filter(event='product.import.completed', enabled=True):
-                deliver_webhook.delay(wh.id, payload)
+        _redis_set(task_id, {
+            "task_id": task_id,
+            "stage": "complete",
+            "processed": processed,
+            "total": total_rows,
+            "message": "Import completed successfully"
+        })
 
-        except Exception as e_webhook:
-            print("Webhook trigger error:", e_webhook)
+        logger.info(f"CSV import complete: {result}")
+        return result
 
     except Exception as e:
-        _redis_set(task_id, {"task_id": task_id, "stage": "failed", "processed": processed, "total": total_rows, "message": str(e), "errors": errors})
+        logger.error(f"Task failed: {e}")
 
-        try:
-            from webhooks.models import Webhook
-            from webhooks.tasks import deliver_webhook
+        _redis_set(task_id, {
+            "task_id": task_id,
+            "stage": "failed",
+            "processed": processed,
+            "total": total_rows,
+            "message": str(e)
+        })
 
-            payload = {
-                "event": "product.import.failed",
-                "task_id": task_id,
-                "status": "failed",
-                "processed": processed,
-                "total": total_rows,
-                "errors": errors,
-                "error_message": str(e),
-            }
-
-            for wh in Webhook.objects.filter(event='product.import.failed', enabled=True):
-                deliver_webhook.delay(wh.id, payload)
-
-        except Exception as ex:
-            print("Webhook failure handling exception:", ex)
-
-        raise
-    finally:
-        try:
-            os.remove(filepath)
-        except Exception:
-            pass
-
+        raise self.retry(exc=e)
 def _upsert_batch(batch):
     with connection.cursor() as cur:
         sql = """

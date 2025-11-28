@@ -57,7 +57,7 @@ A full-stack Product Importer application built using **Django REST Framework**,
 - Connected GitHub repo
 - Set environment variable:
   ```
-  VITE_API_URL=https://your-backend-url.onrender.com
+  VITE_API_URL=https://product-importer-1do8.onrender.com
   ```
 - Triggered build and deployment
 

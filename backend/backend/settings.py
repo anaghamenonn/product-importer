@@ -15,6 +15,7 @@ from pathlib import Path
 from django.core.management.utils import get_random_secret_key
 from dotenv import load_dotenv
 import dj_database_url
+import ssl
 
 load_dotenv() 
 
@@ -163,7 +164,13 @@ CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 
+CELERY_REDIS_BACKEND_USE_SSL = {
+    "ssl_cert_reqs": ssl.CERT_NONE
+}
 
+CELERY_BROKER_USE_SSL = {
+    "ssl_cert_reqs": ssl.CERT_NONE
+}
 
 REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",

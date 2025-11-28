@@ -1,10 +1,10 @@
 from celery import shared_task
-import csv, os, json, io
+import csv, os, json, io, logging
 from django.db import connection
 from psycopg2.extras import execute_values
 from django.conf import settings
 import time
-
+logger = logging.getLogger(__name__)
 REDIS_PROGRESS_PREFIX = "import_progress:"
 
 def _redis_set(task_id, payload):

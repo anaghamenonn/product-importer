@@ -73,7 +73,7 @@ export default function CsvUploader() {
   const pollStatus = (tid) => {
     const interval = setInterval(async () => {
       try {
-        const r = await api.get(`products/tasks/${tid}/status/`);
+        const r = await api.get(`/tasks/${tid}/status/`);
         setStatus(r.data);
         
         if (r.data.stage === 'complete') {
